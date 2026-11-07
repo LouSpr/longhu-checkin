@@ -2,15 +2,19 @@
 
 import logging
 import os
+import re
+import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, longhu, parser, runner, scheduler
+from . import db, dxrisk, longhu, parser, runner, scheduler
+from . import login as app_login
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +98,8 @@ def api_accounts():
     return [_decorate(acc, usage, settings, next_runs) for acc in db.list_accounts()]
 
 
+# 旧版 cURL / HAR / token 导入接口。网页已只提供手机号登录，这里仅为兼容
+# 可能存在的外部脚本而保留，不再有前端入口。
 @app.post("/api/accounts/bind")
 async def api_bind(
     mode: str = Form(...),
@@ -182,6 +188,146 @@ async def api_bind(
     })
     db.add_log(account_id, final_name, "bind", "ok", f"{parsed['note']}，凭据校验通过")
 
+    return {"ok": True, "id": account_id, "name": final_name, "profile": profile}
+
+
+# --------------------------------------------------------------------------
+# 手机号 + 验证码登录：添加新账号不再需要抓包
+#
+# 链路（2026-11-07 实测）：
+#   prepare  → 服务端按手机号签一份独立顶象指纹（dxrisk，纯标准库）
+#   send-code→ App 端签名头（app 密钥）调 sendSmsCodeSecret
+#              首次会返 909001「请操作图形验证」，此时前端跑一次顶象滑块，
+#              把 "<滑块token>:<指纹>" 作为 riskToken 重发即可
+#   verify   → smsCodeSecret 拿到 token/lmid，直接落库
+# 登录拿到的 token 与现有签到链路完全通用（probe_token 两种网关都验过）。
+# --------------------------------------------------------------------------
+
+_sms_cooldown: dict[str, float] = {}
+
+
+def _valid_mobile(raw: str) -> str:
+    value = re.sub(r"\D", "", raw or "")
+    if len(value) != 11 or not value.startswith("1"):
+        raise HTTPException(400, "请输入 11 位手机号")
+    return value
+
+
+def _new_fingerprint(mobile: str) -> str:
+    """给新账号签一份独立指纹；共用指纹会被上游判成同设备多账号。"""
+    last = ""
+    for _ in range(4):
+        try:
+            res = dxrisk.issue(f"{mobile}:{uuid.uuid4().hex}", timeout=15)
+        except Exception as exc:  # 指纹服务偶发超时，重试即可
+            last = str(exc)[:120]
+            continue
+        value = (res.get("token") or "").strip()
+        if value and not db.accounts_with_dx(value):
+            return value
+        last = f"code={res.get('code')}（指纹为空或已被占用）"
+    raise HTTPException(502, f"设备指纹生成失败：{last or '未知原因'}")
+
+
+def _login_error(exc: app_login.LoginError) -> JSONResponse:
+    """透传上游业务码；909001 让前端弹出滑块。"""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "need_captcha": exc.extra_code == "909001",
+            "code": exc.extra_code or exc.code,
+            "message": exc.message,
+        },
+    )
+
+
+@app.post("/api/login/prepare")
+def api_login_prepare(mobile: str = Form(...)):
+    """登录前置：签一份新的设备指纹，后续两步都要原样带回。"""
+    number = _valid_mobile(mobile)
+    return {"ok": True, "mobile": number, "fingerprint": _new_fingerprint(number)}
+
+
+@app.post("/api/login/send-code")
+def api_login_send_code(
+    mobile: str = Form(...),
+    fingerprint: str = Form(...),
+    risk_token: str = Form(""),
+):
+    number = _valid_mobile(mobile)
+    fp = fingerprint.strip()
+    if not fp:
+        raise HTTPException(400, "缺少设备指纹，请重新打开添加账号面板")
+    now = time.time()
+    if now - _sms_cooldown.get(number, 0) < 55:
+        raise HTTPException(400, "发送太频繁，请等 1 分钟再试")
+    try:
+        app_login.send_sms_code(number, fp, risk_token.strip())
+    except app_login.LoginError as exc:
+        return _login_error(exc)
+    _sms_cooldown[number] = now
+    return {"ok": True, "message": f"验证码已发到 {number[:3]}****{number[-4:]}"}
+
+
+@app.post("/api/login/verify")
+def api_login_verify(
+    mobile: str = Form(...),
+    code: str = Form(...),
+    fingerprint: str = Form(...),
+    name: str = Form(""),
+):
+    """用短信验证码换 token，校验后直接写进账号表。"""
+    number = _valid_mobile(mobile)
+    fp = fingerprint.strip()
+    sms = (code or "").strip()
+    if not re.fullmatch(r"\d{4,8}", sms):
+        raise HTTPException(400, "验证码应为 4–8 位数字")
+    if not fp:
+        raise HTTPException(400, "缺少设备指纹，请重新打开添加账号面板")
+    if db.accounts_with_dx(fp):
+        raise HTTPException(400, "这个指纹已被其他账号占用，请重新获取指纹")
+
+    try:
+        result = app_login.login_by_code(number, sms, fp)
+    except app_login.LoginError as exc:
+        return _login_error(exc)
+
+    token = (result.get("token") or "").strip()
+    if not token:
+        raise HTTPException(400, "登录成功但没返回 token，请重试")
+
+    existing = next((a for a in db.list_accounts() if a.get("token") == token), None)
+    if existing:
+        raise HTTPException(400, f"这个账号已经添加过了：{existing['name']}")
+
+    # 登录态和现有签到链路通用；查资料只是为了填默认名/成长值，失败不阻断入库。
+    profile: dict = {}
+    try:
+        profile = longhu.probe_token(token)
+    except longhu.LonghuError as exc:
+        logger.warning("新登录账号资料查询失败（不影响入库）：%s", exc)
+
+    final_name = (
+        (name or "").strip()
+        or profile.get("phone")
+        or f"龙湖账号 {len(db.list_accounts()) + 1}"
+    )
+    account_id = db.create_account({
+        "name": final_name,
+        "token": token,
+        "user_agent": longhu.DEFAULT_UA,
+        "api_key": None,
+        "dx_token": fp,
+        "bu_code": "C20400",
+        "channel": "C2",
+        "growth_value": profile.get("growth_value", 0),
+        "level_name": profile.get("level_name", ""),
+        "balance": profile.get("balance", 0),
+        "nickname": profile.get("nickname", ""),
+        "expire_at": longhu.expire_at(),
+    })
+    db.add_log(account_id, final_name, "login", "ok",
+               f"手机号验证码登录成功，设备指纹已同步（lmid {result.get('lmid') or '-'}）")
     return {"ok": True, "id": account_id, "name": final_name, "profile": profile}
 
 

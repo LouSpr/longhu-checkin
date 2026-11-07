@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>龙湖签到</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     --bg: #0b0d11;
@@ -105,7 +106,7 @@
   .dialog .hint { color: var(--dim); font-size: 12.5px; margin-bottom: 16px; }
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 12.5px; color: var(--dim); margin-bottom: 6px; }
-  input[type=text], textarea, input[type=time], input[type=number], select {
+  input[type=text], input[type=time], input[type=number], select {
     width: 100%; background: #0d1015; border: 1px solid var(--line); border-radius: 10px;
     color: var(--text); padding: 10px 12px; font: inherit; outline: none; transition: .15s;
   }
@@ -115,12 +116,13 @@
     background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
   input[type=number]::-webkit-inner-spin-button,
   input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-  input:focus, textarea:focus { border-color: #3a4a66; box-shadow: 0 0 0 3px rgba(77,139,254,.12); }
-  textarea { resize: vertical; min-height: 132px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+  input:focus, select:focus { border-color: #3a4a66; box-shadow: 0 0 0 3px rgba(77,139,254,.12); }
 
-  .tabs { display: flex; gap: 6px; background: #0d1015; padding: 4px; border-radius: 11px; border: 1px solid var(--line); margin-bottom: 16px; }
-  .tabs button { flex: 1; border: 0; background: transparent; padding: 7px; font-size: 13px; color: var(--dim); border-radius: 8px; }
-  .tabs button.active { background: #1e2530; color: var(--text); }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  .inline input { flex: 1; min-width: 0; }
+  .inline button { white-space: nowrap; flex: none; }
+  details.tips summary { cursor: pointer; color: #a8bdd6; outline: none; }
+  #phStatus { margin-bottom: 14px; }
 
   .dialog-foot { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
   .tips { background: #101720; border: 1px solid #1d2a3a; border-radius: 10px; padding: 11px 13px; font-size: 12px; color: #8fa4bd; line-height: 1.65; margin-bottom: 14px; }
@@ -165,42 +167,47 @@
 <div class="modal" id="modalAdd">
   <div class="dialog">
     <h3>添加账号</h3>
-    <div class="hint">凭据只需导入一次，之后 token 会自动续期，不会再过期。</div>
+    <div class="hint">用手机号 + 验证码登录，不用抓包；之后 token 会自动续期，不会再过期。</div>
 
-    <div class="tabs">
-      <button data-mode="curl" class="active">粘贴 cURL</button>
-      <button data-mode="har">上传 HAR</button>
-      <button data-mode="token">直接填 token</button>
-    </div>
-
-    <div id="tipCurl" class="tips">
-      在 Proxyman 里选中签到请求 → 右键 <code>Copy as cURL</code> → 粘贴到下面。
-    </div>
-    <div id="tipHar" class="tips" style="display:none">
-      在 Proxyman 里选中 <code>gw2c-hw-open.longfor.com</code> → 导出 HAR → 上传，会自动挑出带 token 的请求。
-    </div>
-    <div id="tipToken" class="tips" style="display:none">
-      直接填 32 位 token（抓包里 <code>X-LF-UserToken</code> 的值）。不确定就用上面两种方式。
+    <div id="tipPhone" class="tips">
+      填手机号 → 获取验证码（首次要拖一次滑块）→ 填验证码即可。登录拿到的 token 直接用于签到，
+      还会自动同步一份<b>独立设备指纹</b>（每个账号一份，共用会触发风控）。
     </div>
 
     <div class="field">
-      <label>备注名（可留空，默认用手机号）</label>
+      <label>备注名（可留空，默认用脱敏手机号）</label>
       <input type="text" id="accName" placeholder="留空则自动识别为手机号">
     </div>
 
-    <div class="field" id="fieldText">
-      <label>内容</label>
-      <textarea id="accPayload" placeholder="curl 'https://gw2c-hw-open.longfor.com/...' -H 'X-LF-UserToken: ...'"></textarea>
+    <div class="field">
+      <label>手机号</label>
+      <input type="text" id="phMobile" inputmode="numeric" maxlength="11" placeholder="11 位手机号">
     </div>
-
-    <div class="field" id="fieldFile" style="display:none">
-      <label>HAR 文件</label>
-      <input type="file" id="accFile" accept=".har,.json">
+    <div class="field">
+      <label>设备指纹（自动生成，一账号一份）</label>
+      <div class="inline">
+        <input type="text" id="phFp" readonly placeholder="点「获取验证码」时自动生成">
+        <button class="small ghost" id="btnPhNewFp" type="button">换一个</button>
+      </div>
     </div>
-
+    <div class="field">
+      <label>短信验证码</label>
+      <div class="inline">
+        <input type="text" id="phCode" inputmode="numeric" maxlength="8" placeholder="收到后填写">
+        <button class="small" id="btnPhSend" type="button">获取验证码</button>
+      </div>
+    </div>
+    <div id="phStatus" class="tips" style="display:none"></div>
+    <details class="tips">
+      <summary>高级：手动填写滑块凭证（滑块拉不起来时用）</summary>
+      <div style="margin-top:9px">
+        <input type="text" id="phRisk" placeholder="形如 1A1B...:6aef...">
+        <div style="margin-top:6px;font-size:11.5px">格式为 <code>滑块token:当次指纹c</code>。填了就直接跳过自动滑块。</div>
+      </div>
+    </details>
     <div class="dialog-foot">
-      <button id="btnCancelAdd" class="ghost">取消</button>
-      <button id="btnSubmitAdd" class="primary">校验并添加</button>
+      <button id="btnPhCancel" class="ghost">取消</button>
+      <button id="btnPhSubmit" class="primary">登录并添加</button>
     </div>
   </div>
 </div>
@@ -275,7 +282,8 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let accounts = [];
-let bindMode = "curl";
+let phFingerprint = "";
+let phBusy = false;
 
 function toast(msg, isErr) {
   const el = $("toast");
@@ -294,7 +302,14 @@ async function api(path, opts) {
   }
   let data = null;
   try { data = await res.json(); } catch (e) { /* ignore */ }
-  if (!res.ok) throw new Error((data && (data.detail || data.message)) || `请求失败 ${res.status}`);
+  if (!res.ok) {
+    const d = data && (data.detail || data.message);
+    const msg = (typeof d === "string" && d) || (d && d.message)
+      || (data && data.message) || `请求失败 ${res.status}`;
+    const err = new Error(msg);
+    err.data = data;   // 保留 need_captcha 等结构化信息
+    throw err;
+  }
   return data;
 }
 
@@ -324,7 +339,7 @@ function renderOverview(o) {
 function renderAccounts() {
   if (!accounts.length) {
     $("accounts").innerHTML = `<div class="empty" style="grid-column:1/-1">
-      <b>还没有账号</b>点击右上角「添加账号」，粘贴一次 cURL 就能开始自动签到
+      <b>还没有账号</b>点击右上角「添加账号」，用手机号收一次验证码就能开始自动签到
     </div>`;
     return;
   }
@@ -376,7 +391,7 @@ function renderLogs(logs) {
     const scls = l.status === "ok" ? "s-ok"
       : (l.status === "fail" || l.status === "risk") ? "s-fail"
       : l.status === "already" ? "s-already" : l.status === "todo" ? "s-todo" : "";
-    const names = { refresh: "续期", checkin: "签到", checkin_app: "APP签到", query: "查询", bind: "绑定", run: "执行", dx: "指纹" };
+    const names = { refresh: "续期", checkin: "签到", checkin_app: "APP签到", query: "查询", bind: "绑定", login: "登录", run: "执行", dx: "指纹" };
     return `<div class="log-row">
       <div class="t">${(l.ts || "").replace("T", " ").slice(5, 16)}</div>
       <div class="n">${escapeHtml(l.account_name || "")}</div>
@@ -407,55 +422,143 @@ async function loadAll() {
 }
 
 // ---- 交互 ----
+function phStatus(text, isErr) {
+  const el = $("phStatus");
+  el.style.display = text ? "block" : "none";
+  el.textContent = text || "";
+  el.style.color = isErr ? "var(--red)" : "#8fa4bd";
+  el.style.borderColor = isErr ? "#4a2226" : "#1d2a3a";
+}
+
 $("btnAdd").onclick = () => {
   $("accName").value = "";
-  $("accPayload").value = "";
-  $("accFile").value = "";
+  $("phMobile").value = "";
+  $("phCode").value = "";
+  $("phRisk").value = "";
+  $("phFp").value = "";
+  phFingerprint = "";
+  phStatus("");
   $("modalAdd").classList.add("show");
+  $("phMobile").focus();
 };
-$("btnCancelAdd").onclick = () => $("modalAdd").classList.remove("show");
+$("btnPhCancel").onclick = () => $("modalAdd").classList.remove("show");
 
-document.querySelectorAll(".tabs button").forEach((btn) => {
-  btn.onclick = () => {
-    document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    bindMode = btn.dataset.mode;
-    $("fieldText").style.display = bindMode === "har" ? "none" : "block";
-    $("fieldFile").style.display = bindMode === "har" ? "block" : "none";
-    $("tipCurl").style.display = bindMode === "curl" ? "block" : "none";
-    $("tipHar").style.display = bindMode === "har" ? "block" : "none";
-    $("tipToken").style.display = bindMode === "token" ? "block" : "none";
-  };
-});
+// ---- 手机号 + 验证码登录 ----
+function phMobileValue() {
+  const raw = $("phMobile").value.replace(/\D/g, "");
+  if (!/^1\d{10}$/.test(raw)) throw new Error("请先填 11 位手机号");
+  return raw;
+}
 
-$("btnSubmitAdd").onclick = async () => {
-  const btn = $("btnSubmitAdd");
+async function prepareFingerprint(force) {
+  if (phFingerprint && !force) return phFingerprint;
+  const mobile = phMobileValue();
   const fd = new FormData();
-  fd.append("mode", bindMode);
-  fd.append("name", $("accName").value.trim());
+  fd.append("mobile", mobile);
+  const res = await api("/api/login/prepare", { method: "POST", body: fd });
+  phFingerprint = res.fingerprint || "";
+  $("phFp").value = phFingerprint;
+  return phFingerprint;
+}
 
-  if (bindMode === "har") {
-    const f = $("accFile").files[0];
-    if (!f) return toast("请选择 HAR 文件", true);
-    fd.append("file", f);
-  } else {
-    const text = $("accPayload").value.trim();
-    if (!text) return toast("请粘贴内容", true);
-    fd.append("payload", text);
-  }
-
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spin"></span>校验中';
+$("btnPhNewFp").onclick = async () => {
   try {
-    const res = await api("/api/accounts/bind", { method: "POST", body: fd });
+    await prepareFingerprint(true);
+    toast("已换一份新指纹");
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+
+function loadSliderScript() {
+  if (window.DXSlider) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = "/static/slider.js";
+    s.onload = () => resolve(!!window.DXSlider);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+
+async function solveSlider(fp) {
+  if (!(await loadSliderScript())) {
+    throw new Error("滑块组件加载失败，可在「高级」里手动填写凭证");
+  }
+  phStatus("正在拉起滑块，请把拼块拖到缺口处…");
+  const res = await window.DXSlider.solveManual(fp, {
+    onStatus: (s) => phStatus(s === "loading"
+      ? "正在加载滑块…" : "请拖动拼图，通过后会自动继续发送验证码"),
+  });
+  if (!res.ok) throw new Error("滑块未通过：" + (res.error || "请重试"));
+  return `${res.token}:${res.c || fp}`;
+}
+
+async function sendCodeOnce(risk) {
+  const fd = new FormData();
+  fd.append("mobile", phMobileValue());
+  fd.append("fingerprint", phFingerprint);
+  if (risk) fd.append("risk_token", risk);
+  return api("/api/login/send-code", { method: "POST", body: fd });
+}
+
+$("btnPhSend").onclick = async () => {
+  if (phBusy) return;
+  const btn = $("btnPhSend");
+  phBusy = true;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>发送中';
+  try {
+    const fp = await prepareFingerprint(false);
+    let risk = $("phRisk").value.trim();
+    if (!risk) {
+      // 先直发，只有上游明确要人机验证时才打扰用户
+      try {
+        const res = await sendCodeOnce("");
+        phStatus(`${res.message}，请填写验证码`);
+        return;
+      } catch (e) {
+        if (!(e.data && e.data.need_captcha)) throw e;
+        risk = await solveSlider(fp);
+      }
+    }
+    const res = await sendCodeOnce(risk);
+    phStatus(`${res.message}，请填写验证码`);
+  } catch (e) {
+    phStatus(e.message, true);
+    toast(e.message, true);
+  } finally {
+    phBusy = false;
+    btn.disabled = false;
+    btn.textContent = "获取验证码";
+  }
+};
+
+$("btnPhSubmit").onclick = async () => {
+  if (phBusy) return;
+  const sms = $("phCode").value.trim();
+  if (!/^\d{4,8}$/.test(sms)) return toast("请填收到的验证码", true);
+  if (!phFingerprint) return toast("请先点「获取验证码」", true);
+  const btn = $("btnPhSubmit");
+  phBusy = true;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>登录中';
+  try {
+    const fd = new FormData();
+    fd.append("mobile", phMobileValue());
+    fd.append("code", sms);
+    fd.append("fingerprint", phFingerprint);
+    fd.append("name", $("accName").value.trim());
+    const res = await api("/api/login/verify", { method: "POST", body: fd });
     $("modalAdd").classList.remove("show");
     toast(`已添加：${res.name}`);
     await loadAll();
   } catch (e) {
     toast(e.message, true);
   } finally {
+    phBusy = false;
     btn.disabled = false;
-    btn.textContent = "校验并添加";
+    btn.textContent = "登录并添加";
   }
 };
 

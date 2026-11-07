@@ -1,6 +1,6 @@
 # 龙湖天街自动签到
 
-一个自带 Web 看板的龙湖会员每日签到服务。**导入一次凭据，之后全自动**——token 会在每次执行时自动续期，不用反复抓包，也不依赖青龙面板。
+一个自带 Web 看板的龙湖会员每日签到服务。**手机号 + 验证码添加账号，不用抓包；添加一次之后全自动**——token 会在每次执行时自动续期，也不依赖青龙面板。
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
@@ -10,13 +10,13 @@
 
 ![看板预览](docs/screenshot.png)
 
+> 截图为演示数据：账号名用脱敏手机号，token、成长值等均为示例值，不含任何真实账号信息。
+
 ## 目录
 
-- [为什么需要抓一次包](#为什么需要抓一次包)
+- [添加账号：手机号登录](#添加账号手机号登录)
 - [功能特性](#功能特性)
 - [快速开始](#快速开始)
-- [抓包获取 token](#抓包获取-token)
-- [导入账号](#导入账号)
 - [使用说明](#使用说明)
 - [配置项](#配置项)
 - [HTTP API](#http-api)
@@ -29,7 +29,45 @@
 - [社区](#社区)
 - [免责声明](#免责声明)
 
-## 为什么需要抓一次包
+## 添加账号：手机号登录
+
+> 2026-11-07 更新：这一节原来的结论「做不成手机号 + 验证码登录」**已作废**。
+> 当时只排查了小程序 / 微信 passport 链路，漏了 **App 端自己的短信登录接口**。
+
+网页「添加账号」**只有手机号登录一种方式**，三步走，全程不用抓包：
+
+1. 填手机号 → 点「获取验证码」。服务端按手机号签一份**独立设备指纹**
+   （`app/dxrisk.py`，纯标准库；一账号一份，共用指纹会触发风控）。
+2. 首次发送会返回 `909001 请操作图形验证`，看板自动拉起顶象滑块，**手动拖一次**；
+   通过后把 `<滑块token>:<当次指纹c>` 作为 `riskToken` 重发，短信就到了。
+   滑块跑在用户自己的浏览器里（`app/static/slider.js`），服务端不需要装浏览器。
+   滑块实在拉不起来时，面板「高级」里可以手填凭证。
+3. 填收到的验证码 → 「登录并添加」。服务端换到 token，校验资料后直接写库，
+   并把这份指纹存进 `dx_token`，新账号立刻具备 APP 入口，不用再「补指纹」。
+
+![添加账号：手机号 + 验证码](docs/screenshot-add-account.png)
+
+登录拿到的 token 与现有签到链路完全通用（用 `probe_token` 在 `C20400/C2`
+和 `L00602/L0` 两种网关都验证过）。导入之后 token 仍由服务自动滚动续期，
+有效期 30 天且滑动过期，服务每天跑就永远不会失效；只有**连续停机超过 30 天**
+才需要用手机号重新登录一次（日志里会出现 `token2key 未返回 key`）。
+
+备注名留空时默认用**脱敏手机号**（如 `138****0000`）当显示名——龙湖昵称对所有账号
+都是「珑珠用户」，只有手机号能把多个账号区分开。提交验证码后会先调用户信息接口
+校验 token，通过才写库，不会产生无效账号。账号可随时删除，也可点「立即签到」
+手动跑一轮（续期 + 两个入口 + 刷新资料）。
+
+| 接口 | 作用 |
+|---|---|
+| `POST /supera/mine/v1_30_2/publicApi/login/sendSmsCodeSecret` | 发送验证码（首次需顶象滑块 `riskToken`） |
+| `POST /supera/mine/v1_30_2/publicApi/login/smsCodeSecret` | 提交验证码，返回 `token` / `lmid` |
+
+实现在 `app/login.py`。签名头 `X-LONGZHU-Sign` 的算法见「请求签名」一节，
+**注意 App 端要用 `app` 那套密钥（`app/login.py` 的 `SIGN_SECRET_APP`），
+不是小程序的 `microApp` 密钥**（`app/longhu.py` 的 `SIGN_SECRET_MICRO_APP`）。
+
+<details>
+<summary>早期微信 passport 链路的排查记录（已不需要，仅存档）</summary>
 
 龙湖的账号体系里，手机号只是**绑定在微信身份上的附属信息**，不是独立登录凭证。这一点经过实测确认：
 
@@ -40,14 +78,16 @@
 | 全站 `thirdType` 取值 | 只有一个：`wx-pub` |
 | 密码登录接口 | 不存在（`setPassword` / `forgetPassword` 属于钱包支付密码） |
 
-整个 passport 模块只有 4 个接口，`ticket` 必须由微信客户端生成的 `authCode` 换取，脚本无法凭空构造。所以**做不成「手机号 + 验证码」直接登录**，任何声称能这么做的方案都是假的。
+整个 passport 模块只有 4 个接口，`ticket` 必须由微信客户端生成的 `authCode` 换取，
+脚本无法凭空构造 —— 但 App 端另有一套登录接口，不必走这里。
 
-但这件事只影响「第一次」。token 可以滚动续期，导入一次之后服务会自己续，**不需要长期抓包**。
+</details>
 
 ## 功能特性
 
 - **多账号管理**：一个面板管多个龙湖账号，卡片式展示
-- **三种导入方式**：粘贴 cURL / 上传 HAR / 直接填 token，提交时立即校验，不留脏数据
+- **一种添加方式**：手机号 + 验证码，不用抓包；提交时立即校验，不留脏数据
+- **自动配指纹**：手机号登录时自动给新账号签一份独立顶象指纹，首次滑块在浏览器里手动拖一次即可
 - **token 自动续期**：每次执行前滚动续期，有效期重置为 30 天 → 导入一次后不会再过期
 - **随机签到窗口**：默认在 08:00–09:00 之间随机取一个时刻执行，每天不同，页面上改完立即生效，无需重启
 - **双入口签到**：一次导入，小程序与 APP 两个签到活动各签一次，成长值叠加（APP 入口需配套 App 内设备指纹）
@@ -95,129 +135,6 @@ DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 需要 Python 3.10+（用到了 `dict | None` 语法）。
-
-## 抓包获取 token
-
-这是整个流程里唯一需要手工操作的环节，做完一次就不用再碰。
-
-### 要抓的是什么
-
-你要抓的是**微信小程序「龙湖」的业务请求**。以下特征可以帮你确认抓对了：
-
-| 项目 | 值 |
-|---|---|
-| 请求域名 | `gw2c-hw-open.longfor.com` |
-| 小程序 appid | `wx50282644351869da` |
-| 关键请求头 | `X-LF-UserToken`（32 位十六进制） |
-| 签到接口 | `POST /lmarketing-task-api-mvc-prod/openapi/task/v1/signature/clock` |
-
-### 环境准备
-
-- 一台电脑：macOS 或 Windows
-- **微信 PC 版**（能打开小程序；Mac 版微信 3.8+ 也可以）
-- 抓包工具：macOS 推荐 [Proxyman](https://proxyman.io/)（免费版够用），Windows 推荐 [Reqable](https://reqable.com/)，也可用 Charles / Fiddler
-- **关闭所有 TUN 模式的代理**：Shadowrocket、Clash、Surge、V2Ray 等
-
-> 最后一条是最容易被忽略、也是最常见的失败原因。TUN 型代理工作在 IP 层，会把流量在抓包工具看到之前就抢走，表现就是「抓包工具里一条 longfor 都没有，但微信明明能用」。
-
-### macOS + Proxyman 详细步骤
-
-**1. 安装并信任根证书**
-
-启动 Proxyman → 菜单 `Certificate` → `Install Certificate on this Mac` → 输入密码。然后打开「钥匙串访问」：
-
-```
-钥匙串访问 → 系统 → 找到 "Proxyman CA" → 双击
-→ 展开「信任」→ 使用此证书时：始终信任 → 关闭窗口输入密码
-```
-
-证书没被信任时，HTTPS 请求会解不开，只能看到灰色的 `CONNECT` 隧道。
-
-**2. 确认 SSL 抓取已开启**
-
-Proxyman 默认对所有域名开启 SSL Proxying。如果你之前手动关过，在菜单 `Certificate` → 勾选 `Enable SSL Proxying`。
-
-**3. 退出其它代理工具**
-
-在菜单栏里把 Shadowrocket / Clash 的「连接」关掉。确认默认路由回到物理网卡：
-
-```bash
-netstat -rn | grep default
-# 应该是 en0 / en1，而不是 utun8 之类
-```
-
-**4. 完全退出微信**
-
-`Cmd + Q` 真正退出，不是关窗口。小程序容器的网络服务进程只在启动时读取代理配置，不重启可能抓不到。
-
-**5. 打开小程序并登录**
-
-重新打开微信 → 搜索「**龙湖**」→ 进入小程序（也可能叫「珑珠」或「龙湖天街」）→ 用手机号 + 短信验证码登录。
-
-**6. 触发签到请求**
-
-进入会员 / 积分 / 任务中心，点一次「**签到**」。即使提示「今日已签到」也没关系，请求头里的凭据照样有效。
-
-**7. 在 Proxyman 里找到它**
-
-左下角过滤框输入 `longfor`（或者更精确的 `signature`），找到这条：
-
-```
-POST  gw2c-hw-open.longfor.com
-      /lmarketing-task-api-mvc-prod/openapi/task/v1/signature/clock
-```
-
-点开确认 Request Headers 里存在 `X-LF-UserToken`，就说明抓对了。
-
-**8. 复制成 cURL**
-
-右键这条请求 → `Copy` → `Copy as cURL`。
-
-**9. 收尾**
-
-抓完后关掉 Proxyman（`Cmd+Q`），系统代理会自动恢复；需要的话再把 VPN 开回来。
-
-### Windows + Reqable / Charles
-
-流程完全一致，只有两处差异：
-
-- 根证书装到「**受信任的根证书颁发机构**」，不是「个人」
-- 微信 PC 版同样需要**退出后重开**才能读到代理设置
-
-### 三种提交方式怎么选
-
-| 方式 | 适用场景 | 说明 |
-|---|---|---|
-| **粘贴 cURL** | 最推荐 | 一条命令包含 UA、bu_code、channel，信息最全 |
-| **上传 HAR** | 顺手抓了一堆请求 | 在 Proxyman 里选中域名 → 右键 Export → HAR；服务会自动挑匹配度最高的那条 |
-| **直接填 token** | 你只拿到了那串 32 位字符 | 使用内置的默认 UA，通常也能正常工作 |
-
-### 抓不到？对照排查
-
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| 列表里完全没有 `longfor` | TUN 型代理抢走了流量 | 关掉 Shadowrocket / Clash 的 VPN，确认默认路由回到 `en0/en1` |
-| 只有灰色 `CONNECT`，点开没有内容 | 根证书未信任，或没开 SSL Proxying | 重装证书并设为「始终信任」，确认 SSL Proxying 已勾选 |
-| 微信的请求一条都看不到 | 微信没有完全退出 | `Cmd+Q` 彻底退出后重新打开 |
-| 有请求但没有 `X-LF-UserToken` | 只停在首页，没进会员页 | 进会员 / 签到页面后再抓 |
-| 提示「没找到 token」 | 抓的是静态资源或非业务请求 | 换一条带 token 的接口，如 `user-info` |
-| 提示「凭据校验失败」 | token 已过期 | 重新抓一次；有效期 30 天 |
-
-### 关于有效期
-
-token 的有效期是 **30 天，且是滑动过期**——每次服务续期都会把有效期重新算成 30 天。所以只要服务每天正常运行，它就永远不会过期。
-
-只有一种情况需要重新抓包：**服务连续停机超过 30 天**。这时日志里会出现 `token2key 未返回 key（token 可能已失效）`，重新抓一次导入即可。
-
-## 导入账号
-
-点右上角「**添加账号**」，三选一粘贴/上传，然后「**校验并添加**」。
-
-提交时会立刻调用用户信息接口验证 token，通过后才写入数据库；失败会直接告诉你原因，不会产生无效账号。
-
-备注名留空时，**默认用该账号的脱敏手机号**（如 `189****8375`）当显示名——龙湖的昵称对所有账号都是「珑珠用户」，只有手机号能把多个账号区分开。想自定义就在备注名里填一个。
-
-一个账号可以随时删除，也可以点「**立即签到**」手动执行一轮（包含续期 + 签到 + 刷新资料）。
 
 ## 使用说明
 
@@ -271,7 +188,7 @@ https://oapi.dingtalk.com/robot/send?access_token=xxxxxxxx
 
 三种类型的识别规则：域名是 `day.app` 或其子域 → Bark；域名是 `qyapi.weixin.qq.com` / `oapi.dingtalk.com` → 群机器人；其余情况若路径只有一段（形如 `/DeviceKey`）→ 视为自建 Bark。
 
-> 推送会忽略系统代理（`trust_env = False`）。如果你刚抓完包、系统代理还指向 Proxyman 而 Proxyman 已关闭，告警不会因此失败。
+> 推送会忽略系统代理（`trust_env = False`），不受本机代理设置影响。
 
 ### 日志
 
@@ -304,7 +221,10 @@ https://oapi.dingtalk.com/robot/send?access_token=xxxxxxxx
 | `GET` | `/api/health` | 健康检查，返回数据目录 |
 | `GET` | `/api/overview` | 概览统计、下次执行时间 |
 | `GET` | `/api/accounts` | 账号列表（token 已脱敏），含两个入口的窗口与下次执行时刻 |
-| `POST` | `/api/accounts/bind` | 绑定账号，`multipart/form-data` |
+| `POST` | `/api/accounts/bind` | 旧版 cURL / HAR / token 导入接口，仅为兼容保留，网页已不提供入口 |
+| `POST` | `/api/login/prepare` | `form: mobile`，签发一份新的独立设备指纹，返回 `fingerprint` |
+| `POST` | `/api/login/send-code` | `form: mobile / fingerprint / risk_token`，发送短信验证码；缺滑块时返回 400 且 `need_captcha: true` |
+| `POST` | `/api/login/verify` | `form: mobile / code / fingerprint / name`，换 token 校验后直接入库 |
 | `DELETE` | `/api/accounts/{id}` | 删除账号及其日志、排期 |
 | `POST` | `/api/accounts/{id}/run` | 立即执行一轮（续期 + 两个入口 + 刷新），不受排期限制 |
 | `POST` | `/api/accounts/{id}/schedule` | 自定义该账号时间，`form` 字段 `mini_time` / `app_time`，留空=跟随全局 |
@@ -313,34 +233,28 @@ https://oapi.dingtalk.com/robot/send?access_token=xxxxxxxx
 | `GET` | `/api/settings` | 读取设置、两个窗口与下次执行时间 |
 | `POST` | `/api/settings` | 保存设置，`form` 字段 `checkin_time` / `checkin_jitter` / `app_checkin_time` / `app_checkin_jitter` / `webhook_url` |
 
-绑定账号示例：
+手机号登录示例（网页上不用手写，这里给的是等价的接口调用）：
 
 ```bash
-# 方式一：粘贴 cURL
-curl -X POST http://127.0.0.1:8088/api/accounts/bind \
-  -F "mode=curl" \
-  -F "name=我的账号" \
-  -F "payload=$(pbpaste)"
+# 1) 签一份独立设备指纹（示例号，换成你自己的手机号）
+FP=$(curl -s -X POST http://127.0.0.1:8088/api/login/prepare \
+  -F "mobile=13800000000" | python3 -c "import sys,json;print(json.load(sys.stdin)['fingerprint'])")
 
-# 方式二：上传 HAR
-curl -X POST http://127.0.0.1:8088/api/accounts/bind \
-  -F "mode=har" \
-  -F "name=我的账号" \
-  -F "file=@capture.har"
+# 2) 发验证码。若返回 need_captcha:true，先过滑块拿 "<token>:<c>" 再用 -F "risk_token=..." 重发
+curl -X POST http://127.0.0.1:8088/api/login/send-code \
+  -F "mobile=13800000000" -F "fingerprint=$FP"
 
-# 方式三：直接填 token
-curl -X POST http://127.0.0.1:8088/api/accounts/bind \
-  -F "mode=token" \
-  -F "name=我的账号" \
-  -F "payload=0123456789abcdef0123456789abcdef"
+# 3) 提交验证码，成功后账号直接入库（指纹同步写进 dx_token）
+curl -X POST http://127.0.0.1:8088/api/login/verify \
+  -F "mobile=13800000000" -F "code=000000" -F "fingerprint=$FP" -F "name=我的账号"
 ```
 
 ## 工作原理
 
 ```
-┌──────────────┐   cURL / HAR / token   ┌─────────────────────┐
+┌──────────────┐   手机号 + 验证码      ┌─────────────────────┐
 │  浏览器看板   │ ─────────────────────▶ │  FastAPI            │
-└──────────────┘                        │  ├ parser  解析校验  │
+└──────────────┘                        │  ├ login   短信登录  │
        ▲                                │  ├ runner  编排      │
        │  状态 / 日志 / 统计             │  ├ apscheduler 定时  │
        └──────────────────────────────── │  └ SQLite  存储      │
@@ -540,7 +454,14 @@ cd tools && npm i playwright-core    # 需要本机装 Chrome
 md5( 参数按键名排序后拼成 k=v|k=v + "&" + 毫秒时间戳 + "&" + 固定 secret )
 ```
 
-secret 是小程序前端写死的常量，提取自公开的 H5 前端 JS（`sign-in-prize` 页面脚本）。它写在 `app/longhu.py` 的 `SIGN_SECRET_MICRO_APP` 里。如果哪天龙湖改版换了密钥，续期会失效，更新这个常量即可。
+secret 是前端写死的**客户端常量**（随 App / H5 公开下发，不是服务端私钥），按 `X-Client-Type` 分两套：
+小程序侧的 `microApp`（`app/longhu.py` 的 `SIGN_SECRET_MICRO_APP`）和 App 端的
+`app`（`app/login.py` 的 `SIGN_SECRET_APP`，短信登录用这套）。两套不能混用，
+`getSignHeader` 会按 `X-Client-Type` 选密钥；算法两边完全一致，已用 51 条真实请求样本逐条复现验证。
+
+常量值只在上面两个代码文件里维护，本文档不重复列出。若龙湖改版换了密钥，续期/登录会返回
+`500 小湖忙晕了`：到 App 内嵌 H5 站点 `https://supera-h5.wan-prod.longfor.com` 的主 JS 里
+搜 `getSignHeader`（当前版本是 `/assets/index-2571bea1.js`）重新提取，改对应常量即可恢复。
 
 ### 请求头里哪些是必需的
 
@@ -554,7 +475,7 @@ secret 是小程序前端写死的常量，提取自公开的 H5 前端 JS（`si
 | `X-LF-DXRisk-Token` | ✅ | 顶象设备指纹，必须是 App 内生成的那一份，且**一账号一指纹**。与其他账号共用会被判「同一设备多账号」 | 
 | `X-LF-DXRisk-Captcha-Token` | ⚠️ | 按需：格式 `<token>:<指纹>`。仅在服务端要求人机验证时（回 `8040012`「网络故障」，**不是网络问题**）才需要带上。日常自动签不要预置、更不要为了「试一试」去反复触发——每触发一次都在消耗信任分 |
 | `Cookie` | ❌ | 实测不带也能签到，省掉了 `acw_tc` 30 分钟过期的问题 |
-| `User-Agent` | ⚠️ | 建议与抓包时一致，UA 突变可能触发风控 |
+| `User-Agent` | ⚠️ | 建议保持默认值，UA 突变可能触发风控 |
 
 ## 成长值与会员等级
 
@@ -653,16 +574,20 @@ for name, need in LEVELS:
 ```
 longhu-app/
 ├── app/
-│   ├── main.py          FastAPI 路由与页面入口
+│   ├── main.py          FastAPI 路由与页面入口（含手机号登录三步 API）
 │   ├── longhu.py        龙湖 API 客户端：签名 / 续期 / 签到 / 查询
-│   ├── parser.py        cURL、HAR、token 三路解析
+│   ├── login.py         App 端短信登录：app 密钥签名 / 发码 / 换 token
+│   ├── dxrisk.py        顶象设备指纹签发（纯标准库，一账号一份）
+│   ├── parser.py        旧版 cURL / HAR / token 解析（兼容保留，网页已不用）
 │   ├── runner.py        单账号流程编排 + 告警推送
 │   ├── scheduler.py     APScheduler 定时任务
 │   ├── db.py            SQLite 存储层
 │   └── static/
-│       └── index.html   单文件看板（原生 JS，无构建步骤）
+│       ├── index.html   单文件看板（原生 JS，无构建步骤）
+│       └── slider.js    浏览器端顶象滑块，服务端零浏览器依赖
 ├── docs/
-│   └── screenshot.png
+│   ├── screenshot.png             看板预览（演示数据）
+│   └── screenshot-add-account.png 手机号登录弹窗
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
